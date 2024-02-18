@@ -15,7 +15,7 @@ use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Config, Stack, StackResources};
+use embassy_net::{Config, Stack, StackResources, DhcpConfig};
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
 // use embassy_rp::peripherals::{DMA_CH0, PIO0};
@@ -24,8 +24,8 @@ use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write;
 use static_cell::StaticCell;
+use heapless::String;
 use {defmt_rtt as _, panic_probe as _};
-
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
@@ -70,7 +70,10 @@ async fn main(spawner: Spawner) {
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
 
-    let config = Config::dhcpv4(Default::default());
+    let mut dhcp_config = DhcpConfig::default();
+    let hostname: String<32> = String::try_from("PicoWSwitchRS").unwrap();
+    dhcp_config.hostname = Some(hostname);
+    let config = Config::dhcpv4(dhcp_config);
 
     // Generate random seed
     let seed = 0x0123_4567_89ab_cdef; // chosen by fair dice roll. guarenteed to be random.
