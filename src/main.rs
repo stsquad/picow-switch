@@ -9,20 +9,23 @@ mod config;
 
 use config::{WIFI_NETWORK, WIFI_PASSWORD};
 
-use core::str::from_utf8;
-
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Config, Stack, StackResources, DhcpConfig};
+use embassy_net::{Config, Ipv4Address, Stack, StackResources, DhcpConfig};
+use rust_mqtt::client::client_config::MqttVersion::MQTTv5;
+use rust_mqtt::utils::rng_generator::CountingRng;
+use rust_mqtt::{
+    client::{client::MqttClient, client_config::ClientConfig},
+    packet::v5::publish_packet::QualityOfService,
+};
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
 // use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_25, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_time::{Duration, Timer};
-use embedded_io_async::Write;
 use static_cell::StaticCell;
 use heapless::String;
 use {defmt_rtt as _, panic_probe as _};
@@ -43,6 +46,7 @@ async fn wifi_task(
 async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
     stack.run().await
 }
+
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -107,53 +111,45 @@ async fn main(spawner: Spawner) {
     }
     info!("DHCP is now up!");
 
-    // And now we can use it!
 
     let mut rx_buffer = [0; 4096];
     let mut tx_buffer = [0; 4096];
     let mut buf = [0; 4096];
 
-    loop {
-        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(Duration::from_secs(10)));
+    let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+    socket.set_timeout(Some(Duration::from_secs(10)));
 
-        control.gpio_set(0, false).await;
+    let ip = "192.168.5.85";
+    let port = "1883";
 
-        relay.set_low();
+    defmt::info!("Creating sockets");
+    let addr = (Ipv4Address::new(192,168,5,85), 1883);
 
-        info!("Listening on TCP:1234...");
-        if let Err(e) = socket.accept(1234).await {
-            warn!("accept error: {:?}", e);
-            continue;
-        }
+    let socket = socket.connect(addr);
+    let conn_pub = socket.await.unwrap();
+    // let conn_recv = unsafe { socket.connect(addr).await };
 
-        info!("Received connection from {:?}", socket.remote_endpoint());
-        control.gpio_set(0, true).await;
+    let mut config = ClientConfig::new(MQTTv5, CountingRng(0));
+    // config.add_qos(QualityOfService::QoS0);
+    config.add_max_subscribe_qos(QualityOfService::QoS0);
+    config.add_username("tasmota_plug");
+    config.add_password("plugs");
+    config.keep_alive = u16::MAX;
+    let mut recv_buffer = [0; 1000];
+    let mut write_buffer = [0; 1000];
 
-        relay.set_high();
+    let mut client = MqttClient::<_, 20, CountingRng>::new(
+        socket,
+        &mut write_buffer,
+        1000,
+        &mut recv_buffer,
+        1000,
+        config,
+    );
+    defmt::info!("[PUBLISHER] Connecting to broker");
+    client.connect_to_broker().await.unwrap();
 
-        loop {
-            let n = match socket.read(&mut buf).await {
-                Ok(0) => {
-                    warn!("read EOF");
-                    break;
-                }
-                Ok(n) => n,
-                Err(e) => {
-                    warn!("read error: {:?}", e);
-                    break;
-                }
-            };
-
-            info!("rxd {}", from_utf8(&buf[..n]).unwrap());
-
-            match socket.write_all(&buf[..n]).await {
-                Ok(()) => {}
-                Err(e) => {
-                    warn!("write error: {:?}", e);
-                    break;
-                }
-            };
-        }
-    }
+    defmt::info!("[PUBLISHER] sending message");
+    client.send_message("test-topic", "{'temp':42}").await.unwrap();
+    defmt::info!("[PUBLISHER] message sent");
 }
